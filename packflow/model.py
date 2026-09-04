@@ -7,7 +7,7 @@ from pathlib import Path
 
 @dataclass
 class PackagingStep:
-    title: str
+    title: str = "New step"
     instruction: str = ""
     image_path: str = ""
 
@@ -25,19 +25,21 @@ class PackagingGuide:
     parts_per_row: int = 14
     part_image_path: str = ""
     packing_image_path: str = ""
-    tag_text: str = ""
+    reference_instruction: str = "Place the parts horizontally in even rows as shown."
     steps: list[PackagingStep] = field(default_factory=list)
 
     @property
     def box_dimensions(self) -> str:
         values = [self.box_length, self.box_width, self.box_height]
-        return " × ".join(v for v in values if v)
+        if not any(values):
+            return "-"
+        return " x ".join(v or "-" for v in values) + " in"
 
     @property
     def arrangement_text(self) -> str:
         if self.arrangement_rows > 0 and self.parts_per_row > 0:
-            return f"{self.arrangement_rows} rows × {self.parts_per_row} parts"
-        return "—"
+            return f"{self.arrangement_rows} rows x {self.parts_per_row} parts"
+        return "-"
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -48,7 +50,10 @@ class PackagingGuide:
         data["steps"] = [PackagingStep(**step) for step in data.get("steps", [])]
         allowed = {item.name for item in fields(cls)}
         clean = {key: value for key, value in data.items() if key in allowed}
-        return cls(**clean)
+        guide = cls(**clean)
+        if not guide.steps:
+            guide.steps = [PackagingStep()]
+        return guide
 
     def save(self, path: str | Path) -> None:
         Path(path).write_text(json.dumps(self.to_dict(), indent=2), encoding="utf-8")
@@ -63,10 +68,11 @@ def default_guide() -> PackagingGuide:
         quantity=28,
         arrangement_rows=2,
         parts_per_row=14,
+        reference_instruction="Place the parts horizontally in two even rows as shown.",
         steps=[
-            PackagingStep("Tape box bottom", "Tape along the bottom seam."),
-            PackagingStep("Stack 28 parts in box", "Place horizontally in 2 rows of 14."),
-            PackagingStep("Close and tape box", "Make sure the box is not too lumpy."),
-            PackagingStep("Put tag on left side", "Place one small tag on the left side."),
+            PackagingStep("Tape box bottom.", "Tape directly along the bottom seam."),
+            PackagingStep("Stack 28 parts in box.", "Place the parts horizontally. Make 2 rows of 14 parts (28 total)."),
+            PackagingStep("Close and tape box.", "Make sure the box is not too lumpy."),
+            PackagingStep("Put tag on left side.", "Use one small white tag with the part image and identifying text."),
         ],
     )
