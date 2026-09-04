@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import sys
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 
 BRAND = {
@@ -21,8 +22,6 @@ APP_BG = "#F4F4F1"
 PREFERRED_HEADLINE_FONT = "Elza"
 PREFERRED_ACCENT_FONT = "DM Mono"
 
-# PackFlow does not distribute proprietary font files. It discovers installed
-# Formative 3D brand fonts on the workstation and embeds them into the PDF.
 PDF_ELZA = "PackFlow-Elza"
 PDF_ELZA_BOLD = "PackFlow-Elza-Bold"
 PDF_DM_MONO = "PackFlow-DMMono"
@@ -66,7 +65,6 @@ Writing
 
 
 def resource_path(relative: str) -> Path:
-    """Return a path that works in source and PyInstaller builds."""
     if hasattr(sys, "_MEIPASS"):
         return Path(getattr(sys, "_MEIPASS")) / relative
     return Path(__file__).resolve().parent.parent / relative
@@ -79,7 +77,6 @@ def logo_path() -> Path:
 def _font_roots() -> list[Path]:
     roots: list[Path] = []
     home = Path.home()
-
     if sys.platform.startswith("win"):
         windir = Path(os.environ.get("WINDIR", r"C:\Windows"))
         roots.extend([
@@ -90,31 +87,25 @@ def _font_roots() -> list[Path]:
         ])
     elif sys.platform == "darwin":
         roots.extend([
-            Path("/Library/Fonts"),
-            Path("/System/Library/Fonts"),
-            home / "Library/Fonts",
+            Path("/Library/Fonts"), Path("/System/Library/Fonts"), home / "Library/Fonts",
             home / "Library/Application Support/Adobe/CoreSync/plugins/livetype",
         ])
     else:
         roots.extend([
-            Path("/usr/share/fonts"),
-            Path("/usr/local/share/fonts"),
-            home / ".fonts",
-            home / ".local/share/fonts",
+            Path("/usr/share/fonts"), Path("/usr/local/share/fonts"), home / ".fonts", home / ".local/share/fonts",
         ])
 
-    # Preserve order while removing duplicates.
     result: list[Path] = []
     seen: set[str] = set()
     for root in roots:
         key = str(root).lower()
         if key not in seen:
-            seen.add(key)
-            result.append(root)
+            seen.add(key); result.append(root)
     return result
 
 
-def _font_candidates() -> list[Path]:
+@lru_cache(maxsize=1)
+def _font_candidates() -> tuple[Path, ...]:
     files: list[Path] = []
     for root in _font_roots():
         if not root.exists():
@@ -124,30 +115,54 @@ def _font_candidates() -> list[Path]:
                 files.extend(root.rglob(ext))
         except (OSError, PermissionError):
             continue
-    return files
+    return tuple(files)
 
 
-def _normalized_font_name(path: Path) -> str:
-    return "".join(ch for ch in path.stem.lower() if ch.isalnum())
+def _normalized(text: str) -> str:
+    return "".join(ch for ch in text.lower() if ch.isalnum())
 
 
-def _pick_font(files: list[Path], family_tokens: tuple[str, ...], weight_tokens: tuple[str, ...] = ()) -> Path | None:
+@lru_cache(maxsize=4096)
+def _font_metadata(path_str: str) -> str:
+    """Read internal family/subfamily/PostScript names so Adobe Fonts with opaque filenames are detectable."""
+    path = Path(path_str)
+    names = [path.stem]
+    try:
+        from fontTools.ttLib import TTFont as MetadataFont
+        font = MetadataFont(str(path), lazy=True, fontNumber=0)
+        name_table = font["name"]
+        for record in name_table.names:
+            if record.nameID not in {1, 2, 4, 6, 16, 17}:
+                continue
+            try:
+                names.append(record.toUnicode())
+            except Exception:
+                pass
+        font.close()
+    except Exception:
+        pass
+    return " ".join(names)
+
+
+def _font_search_text(path: Path) -> str:
+    return _normalized(_font_metadata(str(path)))
+
+
+def _pick_font(files: tuple[Path, ...], family_tokens: tuple[str, ...], weight_tokens: tuple[str, ...] = ()) -> Path | None:
     matches: list[Path] = []
     for path in files:
-        name = _normalized_font_name(path)
+        name = _font_search_text(path)
         if all(token in name for token in family_tokens):
             matches.append(path)
-
     if not matches:
         return None
 
     if weight_tokens:
-        weighted = [p for p in matches if any(token in _normalized_font_name(p) for token in weight_tokens)]
+        weighted = [p for p in matches if any(token in _font_search_text(p) for token in weight_tokens)]
         if weighted:
             return sorted(weighted, key=lambda p: len(str(p)))[0]
 
-    # Prefer Regular/Book if present.
-    regular = [p for p in matches if any(t in _normalized_font_name(p) for t in ("regular", "book", "normal"))]
+    regular = [p for p in matches if any(t in _font_search_text(p) for t in ("regular", "book", "normal"))]
     if regular:
         return sorted(regular, key=lambda p: len(str(p)))[0]
     return sorted(matches, key=lambda p: len(str(p)))[0]
@@ -196,11 +211,6 @@ def logo_is_valid() -> bool:
 
 
 def register_pdf_brand_fonts(strict: bool = True) -> BrandFontStatus:
-    """Discover and register Formative 3D fonts with ReportLab.
-
-    Font files are read from fonts already installed on the user's workstation.
-    PackFlow never bundles or redistributes Elza font files.
-    """
     from reportlab.pdfbase import pdfmetrics
     from reportlab.pdfbase.ttfonts import TTFont
 
@@ -210,13 +220,12 @@ def register_pdf_brand_fonts(strict: bool = True) -> BrandFontStatus:
         missing.append("Elza")
     if not status.dm_mono_ok:
         missing.append("DM Mono")
-
     if missing:
         if strict:
             raise RuntimeError(
                 "Required Formative 3D brand font(s) not found: " + ", ".join(missing) + ".\n\n"
-                "Install/activate the fonts on this Windows computer (Adobe Fonts for Elza, and DM Mono), "
-                "then restart PackFlow. PackFlow will not silently export a non-brand-compliant PDF."
+                "Install/activate the fonts on this computer (Adobe Fonts for Elza, and DM Mono), then restart PackFlow. "
+                "PackFlow will not silently export a non-brand-compliant PDF."
             )
         return status
 
